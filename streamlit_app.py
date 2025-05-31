@@ -632,7 +632,7 @@ else:
     with st.sidebar:
         st.subheader("📋 Application Status")
         st.write("**Job Description:**", "✅ Provided" if job_description else "❌ Missing")
-        st.write("**Resume:**", "✅ Uploaded" if uploaded_resume else "❌ Missing") 
+        st.write("**Resume:**", "✅ Provided" if uploaded_resume or (resume_input_method == "Use default file" and default_resume_exists) else "❌ Missing")
         st.write("**Professional Background:**", 
                 "✅ Provided" if professional_background_content else "⚪ Optional (proceeding without)")
         
