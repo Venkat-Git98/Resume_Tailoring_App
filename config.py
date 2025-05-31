@@ -117,30 +117,6 @@ SCRAPER_RELEVANT_JOB_KEYWORDS = [
     "analytics", "statistician", "quantitative", "software", "developer", "llm", "prompt engineering", "rag"
 ]
 
-# --- Email Configuration (Now Centralized for Brevo) ---
-# Brevo SMTP Settings
-BREVO_SMTP_SERVER = "smtp-relay.brevo.com"
-BREVO_SMTP_PORT = 587
-BREVO_SMTP_LOGIN = os.getenv("BREVO_SMTP_LOGIN", "your_default_brevo_login_if_any_for_dev")
-
-# Brevo SMTP Key (Password)
-# It's STRONGLY recommended to use an environment variable for this in production.
-# This config defines the NAME of the environment variable to check.
-BREVO_SMTP_KEY_ENV_VAR_NAME = "BREVO_SMTP_KEY" 
-# !! WARNING: The fallback key below is for your immediate local testing only. !!
-# !! DO NOT commit your actual key to version control if it's hardcoded here.  !!
-# !! Ideally, remove this fallback entirely before any sharing/deployment.       !!
-BREVO_SMTP_KEY_FALLBACK_FOR_TESTING = None
-
-# Displayed 'From' Email Address for Brevo
-# This email MUST be a VERIFIED SENDER in your Brevo account.
-BREVO_SENDER_DISPLAY_EMAIL = os.getenv("BREVO_SENDER_DISPLAY_EMAIL")
-
-# Recipient Email for emails sent by the Scraper/Application
-# This is the email address that will receive the job applications and critiques.
-APP_EMAIL_RECIPIENT = os.getenv("APP_EMAIL_RECIPIENT")
-
-
 # --- Directory Creation ---
 # (Ensuring directories exist is good practice)
 for dir_path in [DATA_DIR, DEFAULT_PDF_OUTPUT_DIR, LOGS_DIR, SCRAPED_JOBS_DATA_DIR]:
@@ -203,15 +179,6 @@ class Config:
     SCRAPER_CONSOLIDATED_RELEVANT_NEW_JOBS_FILE = SCRAPER_CONSOLIDATED_RELEVANT_NEW_JOBS_FILE
     SCRAPER_SCHEDULE_INTERVAL_MINUTES = SCRAPER_SCHEDULE_INTERVAL_MINUTES
     SCRAPER_RELEVANT_JOB_KEYWORDS = SCRAPER_RELEVANT_JOB_KEYWORDS
-    
-    # Email Configuration
-    BREVO_SMTP_SERVER = BREVO_SMTP_SERVER
-    BREVO_SMTP_PORT = BREVO_SMTP_PORT
-    BREVO_SMTP_LOGIN = BREVO_SMTP_LOGIN
-    BREVO_SMTP_KEY_ENV_VAR_NAME = BREVO_SMTP_KEY_ENV_VAR_NAME
-    BREVO_SMTP_KEY_FALLBACK_FOR_TESTING = BREVO_SMTP_KEY_FALLBACK_FOR_TESTING
-    BREVO_SENDER_DISPLAY_EMAIL = BREVO_SENDER_DISPLAY_EMAIL
-    APP_EMAIL_RECIPIENT = APP_EMAIL_RECIPIENT
     
     # Jobright Profile
     JOBRIGHT_PROFILE_DIR_RELATIVE = JOBRIGHT_PROFILE_DIR_RELATIVE
