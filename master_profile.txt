@@ -1,0 +1,14 @@
+**Candidate Master Profile & Key Highlights**
+
+**Core Identity:**
+Machine Learning Engineer with 4+ years of experience specializing in delivering scalable AI/ML pipelines and deploying production-grade models on AWS/GCP. My expertise lies in Python, TensorFlow, PyTorch, and a full suite of MLOps tools including Vertex AI, Kubernetes, MLflow, and Docker. I have a proven record of achieving significant performance improvements, such as 78% predictive accuracy, reducing pipeline latency to under 200ms, and optimizing large-scale Spark-based ETL processes, leading to substantial cost savings. I am deeply invested in applied ML, NLP, and the principles of responsible AI, further honed by my ongoing M.S. in Computer Science.
+
+**Key Career Highlights & Specific Contributions:**
+
+* **ScriptChain Health (Founding AI/ML Engineer):**
+    * Pioneered the training of complex deep learning models across GPU clusters, leveraging DeepSpeed with both model and data parallelization techniques. This approach was instrumental in accelerating training times by approximately 80%.
+    * Engineered and implemented a comprehensive MLOps pipeline for robust model lifecycle management, from development and training through to deployment and monitoring.
+    * Developed an innovative Retrieval-Augmented Generation (RAG) system for the startup, designed to provide personalized food and exercise recommendations to patients. This system [insert a specific, concise metric if you have one, e.g., "achieved a 90% relevance score in pilot tests" or "improved user engagement with health plans by 25%"]. *(Self-correction: The user asked to add some metrics here later; for now, I'll leave a placeholder or a qualitative statement.)* This RAG system demonstrated a significant potential to enhance patient outcomes through tailored lifestyle guidance.
+
+* **General Project Philosophy & Approach:**
+    * My project work, such as the "Intelligent Building Code QA" system (which improved query efficiency by 98%) and the "AI-Text Discriminator" (achieving 97% accuracy), reflects my commitment to building end-to-end solutions that solve real-world problems. I focus on leveraging cutting-edge techniques like RAG, large language models (LLMs), and advanced transformer architectures, ensuring robust feature engineering and thorough model evaluation. I prioritize not just the technical execution but also the practical application and a clear demonstration of value, often through interactive applications or dashboards.
