@@ -1,7 +1,7 @@
 # Resume_Tailoring/utils/llm_gemini.py
 import os
 import requests
-from typing import List, Optional,Dict 
+from typing import List, Optional, Dict, Callable
 import logging
 from models import ResumeSections, JobDescription, ResumeCritique # Corrected
 import config # Corrected
@@ -76,6 +76,83 @@ class GeminiClient:
             logging.error(f"Error parsing Gemini API response: {e}. Response text: {response.text}")
             raise RuntimeError(f"Error parsing Gemini API response: {e}")
 
+
+class OpenRouterClient:
+    """Fallback client using OpenRouter's OpenAI-compatible Chat Completions API."""
+    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None, base_url: Optional[str] = None):
+        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self.base_url = base_url or os.getenv("OPENROUTER_BASE_URL", getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
+        self.model = model_name or os.getenv("OPENROUTER_MODEL_PRIMARY", "deepseek/deepseek-chat-v3-0324:free")
+        if not self.api_key:
+            raise EnvironmentError("Missing OPENROUTER_API_KEY. Set it in .env or environment variables.")
+
+    def generate_text(self, prompt: str, temperature: float = 0.2, max_tokens: int = 1024, top_p: Optional[float] = None, model_override: Optional[str] = None) -> str:
+        model_to_use = model_override or self.model
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        url = f"{self.base_url}/chat/completions"
+        resp = requests.post(url, headers=headers, json=body)
+        if resp.status_code != 200:
+            raise RuntimeError(f"OpenRouter API call failed: {resp.status_code} {resp.text}")
+        data = resp.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logging.error(f"Malformed OpenRouter response: {data}")
+            raise RuntimeError(f"Malformed OpenRouter response: {e}")
+
+
+class LLMRouter:
+    """Simple router: try Gemini first, then cascade through OpenRouter free models on failure.
+    Task types can hint which free model to prioritize.
+    """
+    def __init__(self, gemini_api_key: Optional[str] = None, gemini_model: Optional[str] = None):
+        self.gemini = None
+        try:
+            resolved_key = gemini_api_key or os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') or getattr(config, 'GEMINI_API_KEY', None)
+            self.gemini = GeminiClient(api_key=resolved_key, model_name=gemini_model or getattr(config, 'GEMINI_MODEL_FOR_TAILORING', 'gemini-1.5-pro-001'))
+        except Exception as e:
+            logging.warning(f"LLMRouter: Gemini init failed or missing key. Will rely on OpenRouter. Error: {e}")
+            self.gemini = None
+
+        self.openrouter = None
+        try:
+            self.openrouter = OpenRouterClient(api_key=getattr(config, 'OPENROUTER_API_KEY', None), base_url=getattr(config, 'OPENROUTER_BASE_URL', None))
+        except Exception as e:
+            logging.warning(f"LLMRouter: OpenRouter init failed: {e}")
+            self.openrouter = None
+
+        self.free_model_priority = getattr(config, 'OPENROUTER_FREE_MODEL_PRIORITY', ["deepseek/deepseek-chat-v3-0324:free"]) or ["deepseek/deepseek-chat-v3-0324:free"]
+
+    def generate(self, prompt: str, temperature: float = 0.2, max_tokens: int = 1024, top_p: Optional[float] = None, task: str = "generic") -> str:
+        # 1) Try Gemini if available
+        if self.gemini:
+            try:
+                return self.gemini.generate_text(prompt, temperature=temperature, max_tokens=max_tokens, top_p=top_p)
+            except Exception as e:
+                logging.warning(f"LLMRouter: Gemini failed for task '{task}': {e}")
+
+        # 2) Try OpenRouter models in priority order
+        if self.openrouter:
+            for model_name in self.free_model_priority:
+                try:
+                    return self.openrouter.generate_text(prompt, temperature=temperature, max_tokens=max_tokens, top_p=top_p, model_override=model_name)
+                except Exception as e:
+                    logging.warning(f"LLMRouter: OpenRouter model failed '{model_name}' for task '{task}': {e}")
+
+        raise RuntimeError("All LLM providers failed for current request.")
+
 import logging
 from typing import List, Optional
 
@@ -109,10 +186,14 @@ def get_section_prompt(
     how_to_use_context_instruction = f"""
 GENERAL INSTRUCTIONS (APPLY TO ALL GENERATED RESUME SECTIONS):
 1.  **Primary Goal:** Based on the CANDIDATE'S MASTER PROFILE (if provided), their ORIGINAL CONTENT for the current section, the TARGET JOB TITLE, KEY REQUIREMENTS, and specific ATS KEYWORDS, rewrite and tailor the '{section.upper()}' section. Your main goal for all sections is to impress a recruiter by highlighting the candidate's suitability for the target role with impactful language and quantifiable achievements where possible.
-2.  **ATS Optimization (CRITICAL):** Across ALL sections, strategically and naturally integrate relevant ATS keywords from the job description as well as core skills for the target role type. Aim for a high degree of relevance and keyword density to help achieve a strong ATS score (ideally above 80%), without making the text sound unnatural, forced, or repetitive.
-3.  **Instruction Adherence:** Follow ALL specific instructions given for the current section regarding length, format, content, and tone METICULOUSLY.
-4.  **Avoid Orphan Words (Readability):** Strive for natural sentence flow in all generated text (summaries, bullet points, descriptions). Where possible through minor rephrasing (without sacrificing clarity, conciseness, or impact), try to avoid leaving single or very few words (e.g., 1 or 2 words) on the last line of a paragraph or bullet point. This enhances readability.
-5.  **Keyword Integration for Current Section:** Strategically incorporate the provided ATS KEYWORDS into THIS '{section.upper()}' section, ensuring they are used naturally and effectively, especially if they haven't been strongly emphasized in the master profile or original content. Avoid excessive keyword stuffing.
+    2.  **ATS Optimization (CRITICAL):**
+        - Integrate relevant ATS keywords naturally in Summary, Skills, and Experience.
+        - Use standard headings (SUMMARY, WORK EXPERIENCE, TECHNICAL SKILLS, PROJECTS). Avoid tables/columns/graphics.
+        - Start bullets with strong action verbs and include quantifiable metrics where possible.
+        - Keep simple text formatting; do not use headers/footers for essential info. No images or special characters that break parsing.
+    3.  **Instruction Adherence:** Follow ALL specific instructions given for the current section regarding length, format, content, and tone METICULOUSLY.
+    4.  **Avoid Orphan Words (Readability):** Strive for natural sentence flow. Prefer compact, single‑line bullets when feasible.
+    5.  **Keyword Integration for Current Section:** Strategically incorporate the provided ATS KEYWORDS into THIS '{section.upper()}' section, ensuring they are used naturally and effectively, especially if they haven't been strongly emphasized in the master profile or original content. Avoid excessive keyword stuffing.
 """
     # --- END MODIFIED ---
 
@@ -139,7 +220,10 @@ You are an expert technical resume writer and career coach. Your task is to rewr
 """
     # --- SUMMARY SECTION (UPDATED AS PER YOUR REQUEST) ---
     if section == 'summary':
-        candidate_education_level_fact = "The candidate is pursuing a Master's degree (M.S.) in Computer Science."
+        # Use a neutral, graduate-completed statement unless master_profile/original says otherwise
+        candidate_education_level_fact = (
+            "The candidate holds a Master's degree in Computer Science (graduated)."
+        )
         return f"""
 {base_prompt_intro}
 
@@ -149,9 +233,9 @@ You are an expert technical resume writer and career coach. Your task is to rewr
     * **ABSOLUTELY DO NOT** mention the specific company name ('{company_name_from_jd if company_name_from_jd else "the company"}'), its products, its mission, its values, or any company-specific information.
     * **DO NOT** tailor the summary to the specific company. It should be a general, strong summary for the *type* of role.
     * **DO NOT** mention work arrangement preferences (e.g., remote, hybrid, onsite) or the specific location mentioned in the job description.
-2.  **Accurate Educational Qualification (CRITICAL):**
-    * **{candidate_education_level_fact}**
-    * **YOU MUST ACCURATELY REFLECT THIS EDUCATION LEVEL.** Do NOT state or imply the candidate is a PhD candidate or pursuing a PhD. Refer to the candidate's current Master's degree program as needed, based on the provided Master Profile or Original Content. Ensure factual accuracy regarding their educational qualifications.
+    2.  **Accurate Educational Qualification (CRITICAL):**
+        * **{candidate_education_level_fact}**
+        * **YOU MUST ACCURATELY REFLECT THIS EDUCATION LEVEL.** Do NOT state or imply the candidate is a student or "pursuing" unless the provided source text explicitly says so. If dates indicate completion, present it as completed (e.g., "M.S. in Computer Science").
 3.  **Length & Structure (ABSOLUTELY CRITICAL):**
     * The rewritten summary **MUST be 3 to 4 complete lines long.**
     * The total character count for the entire summary (including spaces) **MUST be strictly between 350 and 450 characters.**
@@ -182,7 +266,7 @@ You are an expert technical resume writer and career coach. Your task is to rewr
     * If a role is titled "Digital Transformation Developer":
         * Generate EXACTLY 2 bullet points. Each bullet point should aim for **approximately 100-120 characters** and **MUST NOT EXCEED 120 characters.**
     * For any other roles identified:
-        * Generate 2-3 concise bullet points. Each bullet point should aim for **approximately 130-150 characters** and **MUST NOT EXCEED 150 characters.**
+        * Generate 2-3 concise bullet points. Each bullet point should aim for **approximately 110-140 characters** and **MUST NOT EXCEED 150 characters.**
     * Ensure all character limits are for the bullet point text itself (excluding the leading asterisk/bullet symbol or any markdown for bolding).
 """
         return f"""
@@ -237,9 +321,9 @@ The 'Technical Skills' section is critically important as it's often the first a
     * Group related skills under logical, concise subheadings (e.g., Programming Languages, ML Frameworks & Libraries, MLOps & Cloud, Databases & Data Engineering, Key ML Concepts). Use standard industry terms for categories.
     * **Example of desired output format for a category:** `Programming Languages: **Python**, SQL, **Java**`
         (Note: Category names like "Programming Languages:" should NOT be bolded by you with **markdown**; only mark individual skills like **Python** for bolding if they meet the {bolding_instruction} criteria).
-4.  **Overall Length, Consistency, and Conciseness (CRITICAL):**
-    * Aim for approximately **4 to 5 main categorized skill lines/groups in total** for the entire skills section. This ensures the section is substantial but not overwhelming.
-    * Each categorized skill line (meaning the subheading/category label AND all the skills listed for it) **MUST BE STRICTLY UNDER 110 characters.** This is a hard limit per line to maintain scannability and fit.
+ 4.  **Overall Length, Consistency, and Conciseness (CRITICAL):**
+     * Aim for approximately **4 to 5 main categorized skill lines/groups in total** for the entire skills section. This ensures the section is substantial but not overwhelming.
+     * Each categorized skill line **MUST BE STRICTLY UNDER 110 characters**, use standard naming (e.g., Programming Languages, ML Frameworks & Libraries, MLOps & Cloud, Data Engineering & Pipelines, AI/ML Specializations).
     * To meet this, be extremely concise in both category names and the skills listed. For any given category, select only the most impactful and relevant skills. For instance, for a 'Machine Learning' category, choose a maximum of 4-5 of the MOST CRITICAL and distinct areas/concepts to ensure the entire line remains under 110 characters.
 5.  {bolding_instruction} (Apply this to individual skills within the comma-separated lists, e.g., `**Python**, SQL, **Java**`). Do NOT apply it to the category names.
 6.  **Accuracy:** DO NOT list skills the candidate does not demonstrably possess based on the provided source materials.
@@ -257,8 +341,8 @@ The 'Technical Skills' section is critically important as it's often the first a
 1.  **Identify Distinct Projects:** Parse from "Original Content of 'PROJECTS'" or "CANDIDATE'S MASTER PROFILE".
 2.  **Structure & Content for Each Project (NO SEPARATE TECH STACK LISTING):**
     * **Title:** Clearly state the project title. **Do NOT use markdown like '##' for project titles.** Optionally, you can add a brief, relevant tagline if it fits well (e.g., "| _NLP, RAG_").
-    * **Bullet Points:** Provide **EXACTLY 2 bullet points** describing the project.
-    * **Character Limit per Bullet:** Each of these 2 bullet points **MUST BE STRICTLY UNDER 170 characters** (aim for 140-160 characters).
+    * **Bullet Points:** Provide **EXACTLY 2 bullet points** describing the project (keep count fixed at 2).
+    * **Character Limit per Bullet:** Each bullet point **MUST BE STRICTLY UNDER 190 characters** (aim for 170-185 characters) to increase context while staying one-page compliant.
     * **Line Flow & Orphans:** Strive for each bullet point to be a single impactful line or, at most, two concise lines to enhance readability and avoid orphan words. Rephrase slightly if needed to ensure lines break cleanly, particularly if a bullet point extends to two lines, while adhering to the character limit.
     * Relevant technologies (especially from "ATS KEYWORDS" or "Key Requirements/Keywords from Job Description") should be naturally woven into the bullet point descriptions if they are key to the achievement and space permits. Do not list a separate "Tech Stack:" line.
 3.  **Bullet Point Content (Problem, Action, Result - within constraints):**
@@ -342,7 +426,12 @@ def get_cover_letter_prompt(
     if not profile_source_text:
         profile_source_text = "\nCandidate information (Master Profile, Tailored Resume sections) seems to be missing or incomplete. Base your writing on any available details."
 
-    salutation_address = hiring_manager_name if hiring_manager_name else f"Hiring Team at {company_name}"
+    # Salutation logic: if company name is missing or looks generic, use Dear Hiring Manager
+    fallback_salutation = "Dear Hiring Manager"
+    generic_tokens = {None, "", "the Hiring Company", "Hiring Company", "Company", "TargetCompany"}
+    use_generic = (company_name is None) or (str(company_name).strip() in generic_tokens)
+    salutation_address = hiring_manager_name if hiring_manager_name else (fallback_salutation if use_generic else f"Hiring Team at {company_name}")
+    company_name_for_context = "N/A" if use_generic else str(company_name)
 
     project_context_for_cl = ""
     if project_details_for_cl:
@@ -379,7 +468,7 @@ Your task is to write a highly personalized, impactful, and human-written one-pa
 
 2.  **TARGET ROLE & COMPANY (Source Material):**
     * Job Title: {job_title}
-    * Company Name: {company_name}
+    * Company Name: {company_name_for_context}
     * Key Job Requirements Summary (from Job Description): {job_requirements_summary if job_requirements_summary else 'Not explicitly provided; infer from ATS Keywords and Job Title.'}
     * Key ATS Keywords to Address: {ats_keywords_str if ats_keywords_str else 'Focus on general alignment with the job title and requirements.'}
 
@@ -407,8 +496,8 @@ Your task is to write a highly personalized, impactful, and human-written one-pa
             * **If '{company_name}' is a specific, real company name (e.g., "NVIDIA", "Google", "Aidaptive", not generic like "Hiring Team" or "A Startup"):**
                 * You MUST research (or infer based on common knowledge if specific research isn't possible from the context provided) and weave in 1-2 brief, genuine, and *specific* points about your interest in *that particular company*. This could be related to its known mission, widely recognized values, a significant recent project or product, its industry leadership, or how its specific work aligns with the candidate's career goals or values from the Master Profile.
                 * **Your output for this part MUST be the actual personalized sentence(s). DO NOT output instructional text or placeholders like "[mention a specific detail...]" or "[company-specific point]" or similar.**
-            * **If, after attempting to personalize, you cannot find truly specific information about '{company_name}' OR if '{company_name}' seems like a generic placeholder:**
-                * In this case, instead of specific company details, you should write a sentence or two expressing enthusiasm for the *type of work done in the industry of the '{job_title}'*, or how the *challenges typical for such a role* are what motivate the candidate. Focus on the candidate's passion for the field and the general opportunity the role represents.
+            * **If the company name is unavailable/generic (e.g., not extracted or appears as placeholders) or after attempting to personalize you cannot find specific information:**
+                * Use the generic salutation ('Dear Hiring Manager') and DO NOT mention a company name in the body. Avoid phrases like "the Hiring Company" or "the Company". Instead, tailor to the role and its challenges, expressing enthusiasm for the domain and responsibilities typical of the '{job_title}'.
                 * **Again, DO NOT output any instructional text or placeholders. Generate actual, natural-sounding prose that fits the context.**
     * **Closing Paragraph:**
         * Briefly reiterate your strong interest and confidence in your ability to contribute.
@@ -429,7 +518,7 @@ Your task is to write a highly personalized, impactful, and human-written one-pa
     * Avoid clichés (e.g., "I am a hardworking team player"). Show your qualities through examples.
     * Do NOT make up information or skills not present in the provided "CANDIDATE INFORMATION".
     * Do NOT include your own headers like "Cover Letter:" or "Dear {salutation_address}," if the salutation is already handled by the structure above. Start directly with the salutation.
-    * **CRITICALLY AVOID (PLACEHOLDERS):** Do not output any instructional text or placeholders from this prompt (e.g., "[mention a specific detail...]", "[company-specific point]", "[Project URL]"). Your response must be the cover letter itself, ready for use.
+    * **CRITICALLY AVOID (PLACEHOLDERS):** Do not output any instructional text or placeholders from this prompt (e.g., "[mention a specific detail...]", "[company-specific point]", "[Project URL]"). Do not include filler phrases like "the Hiring Company". Your response must be the cover letter itself, ready for use.
     * **CRITICALLY AVOID (PROJECT URLS IN BODY):** Do not insert any URLs for specific projects (e.g., 'http://...', 'www...') within the body paragraphs when discussing projects.
 
 **OUTPUT FORMAT:**

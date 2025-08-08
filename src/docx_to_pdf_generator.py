@@ -8,6 +8,7 @@ import json
 # --- Google Drive API Imports ---
 import io
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request as AuthRequest # Added
@@ -15,10 +16,11 @@ from google.auth.transport.requests import Request as AuthRequest # Added
 # --- Document Generation Imports (python-docx) ---
 from docx import Document
 from docx.shared import Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.opc.constants import RELATIONSHIP_TYPE
+from PyPDF2 import PdfReader
 
 # --- Configuration Import ---
 app_config = None # Initialize
@@ -34,14 +36,52 @@ except ImportError as e:
 logger = logging.getLogger(__name__)
 EMU_PER_POINT = Pt(1)
 
+def _remove_table_borders(table):
+    """Remove borders by setting each cell's borders to nil (works across python-docx versions)."""
+    for row in table.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcBorders = tcPr.find(qn('w:tcBorders'))
+            if tcBorders is None:
+                tcBorders = OxmlElement('w:tcBorders')
+                tcPr.append(tcBorders)
+            for edge in ('top', 'left', 'bottom', 'right'):
+                element = tcBorders.find(qn(f'w:{edge}'))
+                if element is None:
+                    element = OxmlElement(f'w:{edge}')
+                    tcBorders.append(element)
+                element.set(qn('w:val'), 'nil')
+
 # --- Google Drive API Helper Functions (from your example) ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 def get_drive_service():
-    """Authenticates and returns a Google Drive API service object."""
+    """Authenticates and returns a Google Drive API service object.
+    Prefers user OAuth (refresh token) if env vars present; otherwise uses service account.
+    """
     creds = None
-    
-    # Access the JSON content string from app_config
+
+    # 1) Try user OAuth credentials from environment
+    oauth_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+    oauth_client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+    oauth_refresh_token = os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN")
+    if oauth_client_id and oauth_client_secret and oauth_refresh_token:
+        try:
+            creds = UserCredentials(
+                None,
+                refresh_token=oauth_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=oauth_client_id,
+                client_secret=oauth_client_secret,
+                scopes=SCOPES,
+            )
+            service = build('drive', 'v3', credentials=creds, static_discovery=False)
+            logger.info("Google Drive API service created successfully (user OAuth).")
+            return service
+        except Exception as e:
+            logger.error(f"Failed to build Drive service with user OAuth: {e}")
+
+    # 2) Fallback to service account JSON content
     service_account_json_content_str = getattr(app_config, 'SERVICE_ACCOUNT_JSON_CONTENT', None)
 
     if not service_account_json_content_str or not isinstance(service_account_json_content_str, str):
@@ -86,6 +126,9 @@ def upload_and_convert_to_google_doc(drive_service, local_docx_path, drive_filen
         'name': f"{drive_filename_prefix}_original.docx",
         'mimeType': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     }
+    parent_id = getattr(app_config, 'DRIVE_PARENT_FOLDER_ID', None)
+    if parent_id:
+        original_docx_file_metadata['parents'] = [parent_id]
     media = MediaFileUpload(local_docx_path,
                             mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                             resumable=True)
@@ -95,7 +138,7 @@ def upload_and_convert_to_google_doc(drive_service, local_docx_path, drive_filen
         original_file = drive_service.files().create(
             body=original_docx_file_metadata,
             media_body=media,
-            fields='id, name'
+            fields='id, name', supportsAllDrives=True
         ).execute()
         original_uploaded_file_id = original_file.get('id')
         logger.info(f"Original DOCX uploaded. Drive File ID: {original_uploaded_file_id}, Name: {original_file.get('name')}")
@@ -116,7 +159,7 @@ def upload_and_convert_to_google_doc(drive_service, local_docx_path, drive_filen
         copied_file = drive_service.files().copy(
             fileId=original_uploaded_file_id,
             body=copy_metadata,
-            fields='id, name'
+            fields='id, name', supportsAllDrives=True
         ).execute()
         google_doc_native_id = copied_file.get('id')
         logger.info(f"Successfully converted to native Google Doc. New File ID: {google_doc_native_id}, Name: {copied_file.get('name')}")
@@ -160,7 +203,7 @@ def delete_file_from_drive(drive_service, file_id):
         return
     try:
         logger.info(f"Deleting Drive File ID '{file_id}'...")
-        drive_service.files().delete(fileId=file_id).execute()
+        drive_service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
         logger.info(f"File deleted successfully from Google Drive (ID: {file_id}).")
     except Exception as e:
         logger.warning(f"Could not delete file from Google Drive (ID: {file_id}): {e}", exc_info=True)
@@ -321,13 +364,26 @@ def add_section_header_docx(document, header_text: str):
     bottom_border.set(qn('w:space'), '1'); bottom_border.set(qn('w:color'), '444444')
     pBdr.append(bottom_border); pPr.append(pBdr)
 
-def add_summary_docx(document, summary_text: str):
+def _apply_keyword_bolding(text: str, ats_keywords: Optional[List[str]]) -> str:
+    """Wrap up to a few ATS keywords in ** for programmatic bolding. Case-insensitive, avoids double-wrapping."""
+    if not text or not ats_keywords:
+        return text
+    processed = text
+    # Sort keywords by length to avoid partial overlaps (longest first)
+    for kw in sorted({k for k in ats_keywords if k}, key=len, reverse=True):
+        escaped = re.escape(kw)
+        # Loose boundary to handle C++, ML/DL, CI/CD; avoid double-wrapping
+        pattern = re.compile(rf'(?i)(?<!\*)(?<![A-Za-z0-9])({escaped})(?![A-Za-z0-9])(?!\*)')
+        processed = pattern.sub(r'**\1**', processed)
+    return processed
+
+def add_summary_docx(document, summary_text: str, ats_keywords: Optional[List[str]] = None):
     logger.info("Adding summary to DOCX...")
     add_section_header_docx(document, "SUMMARY")
-    add_styled_paragraph(document, summary_text, font_name='Times New Roman', font_size=Pt(10),
+    add_styled_paragraph(document, _apply_keyword_bolding(summary_text, ats_keywords), font_name='Times New Roman', font_size=Pt(10),
                          line_spacing=1.15, space_after=Pt(6))
 
-def add_work_experience_docx(document, work_experience_text: str):
+def add_work_experience_docx(document, work_experience_text: str, ats_keywords: Optional[List[str]] = None):
     logger.info("Adding work experience to DOCX...")
     add_section_header_docx(document, "WORK EXPERIENCE")
     if not work_experience_text or not work_experience_text.strip():
@@ -337,7 +393,12 @@ def add_work_experience_docx(document, work_experience_text: str):
 
     cleaned_text = re.sub(r"^## Work Experience\s*\n+", "", work_experience_text, flags=re.IGNORECASE).strip()
     job_entries = re.split(r'\n\s*\n+(?=\s*(?:\*\*)?[A-Z][\w\s.,-]+?\s*(?:\*\*)?\s*\|)', cleaned_text)
-    right_tab_stop = Inches(7.4) # Adjust as needed
+    # ATS-friendly: no tables. Use a consistent left-aligned tab stop for the date column
+    date_tab_stop = Inches(5.1)
+
+    # Month pattern: short and long forms
+    month_pat = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+    date_line_re = re.compile(rf'^\*?\s*{month_pat}\s+\d{{4}}\s*[\u2013\-\–]\s*(?:{month_pat}\s+\d{{4}}|Present)\s*(?:\*)?\s*$', re.IGNORECASE)
 
     for entry_text in job_entries:
         entry_text = entry_text.strip()
@@ -346,38 +407,56 @@ def add_work_experience_docx(document, work_experience_text: str):
         if not lines: continue
 
         p_job_header = document.add_paragraph()
-        p_job_header.paragraph_format.tab_stops.add_tab_stop(right_tab_stop, WD_ALIGN_PARAGRAPH.RIGHT)
         p_job_header.paragraph_format.widow_control = True
-        header_parts = lines[0].split('|')
-        add_runs_with_markdown_bold(p_job_header, header_parts[0].strip(), 'Times New Roman', Pt(10), base_bold=True)
+        p_job_header.paragraph_format.tab_stops.clear_all()
+        p_job_header.paragraph_format.tab_stops.add_tab_stop(Inches(7.2), WD_TAB_ALIGNMENT.RIGHT)
+        header_parts = [part.strip() for part in lines[0].split('|')]
+        composed_header = header_parts[0]
         if len(header_parts) > 1:
-            p_job_header.add_run(" | ").font.name = 'Times New Roman';
-            add_runs_with_markdown_bold(p_job_header, header_parts[1].strip(), 'Times New Roman', Pt(10), base_bold=True)
+            composed_header += f" | {header_parts[1]}"
         if len(header_parts) > 2:
-            p_job_header.add_run(" | ").font.name = 'Times New Roman';
-            add_runs_with_markdown_bold(p_job_header, header_parts[2].strip(), 'Times New Roman', Pt(10), base_italic=True)
+            composed_header += f" | {header_parts[2]}"
+        add_runs_with_markdown_bold(p_job_header, composed_header, 'Times New Roman', Pt(10), base_bold=True)
 
         bullet_start_index = 1
-        if len(lines) > 1 and re.match(r'^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Present|September)[\w\s,–-]+$', lines[1].strip(), re.IGNORECASE):
-            date_line_str = lines[1].strip()
+        # Detect date line on the next line and move into header as a tab-aligned run
+        found_date_line = None
+        if len(lines) > 1 and date_line_re.match(lines[1].strip()):
+            found_date_line = lines[1].strip().lstrip('*').strip()
+            bullet_start_index = 2
+        else:
+            # Fallback: search any line for a date range pattern, remove it from that line
+            for i in range(1, len(lines)):
+                if date_line_re.match(lines[i].strip()):
+                    found_date_line = lines[i].strip().lstrip('*').strip()
+                    bullet_start_index = 1 if i == 1 else 1  # bullets still start after header
+                    # Remove the date line from content lines
+                    lines.pop(i)
+                    break
+
+        if found_date_line:
+            date_line_str = found_date_line.replace('*','')
             run_date = p_job_header.add_run('\t' + date_line_str)
             run_date.font.name = 'Times New Roman'; run_date.font.size = Pt(10); run_date.italic = True
-            bullet_start_index = 2
         
         p_job_header.paragraph_format.space_after = Pt(2)
         p_job_header.paragraph_format.keep_with_next = True
 
         for i in range(bullet_start_index, len(lines)):
             line = lines[i]
+            # If a date-pattern bullet slipped in, skip it
+            if date_line_re.match(line):
+                continue
             if line.startswith('*'):
-                add_styled_paragraph(document, line[1:].strip(), style_name='List Bullet',
+                bullet_text = _apply_keyword_bolding(line[1:].strip(), ats_keywords)
+                add_styled_paragraph(document, bullet_text, style_name='List Bullet',
                                      font_name='Times New Roman', font_size=Pt(10),
                                      space_after=Pt(2), line_spacing=1.15)
         if len(lines) > bullet_start_index and document.paragraphs:
             document.paragraphs[-1].paragraph_format.space_after = Pt(6)
 
 
-def add_technical_skills_docx(document, skills_text: str):
+def add_technical_skills_docx(document, skills_text: str, ats_keywords: Optional[List[str]] = None):
     logger.info("Adding technical skills to DOCX...")
     add_section_header_docx(document, "TECHNICAL SKILLS")
     if not skills_text or not skills_text.strip():
@@ -396,11 +475,18 @@ def add_technical_skills_docx(document, skills_text: str):
         parts = category_line.split(':', 1)
         if len(parts) == 2:
             add_runs_with_markdown_bold(p, parts[0].strip() + ": ", 'Times New Roman', Pt(10), base_bold=True)
-            add_runs_with_markdown_bold(p, parts[1].strip(), 'Times New Roman', Pt(10))
+            add_runs_with_markdown_bold(p, _apply_keyword_bolding(parts[1].strip(), ats_keywords), 'Times New Roman', Pt(10))
         else:
-            add_runs_with_markdown_bold(p, category_line, 'Times New Roman', Pt(10))
+            add_runs_with_markdown_bold(p, _apply_keyword_bolding(category_line, ats_keywords), 'Times New Roman', Pt(10))
 
-def add_projects_docx(document, projects_text: str, contact_data: Dict[str, str]):
+def add_projects_docx(
+    document,
+    projects_text: str,
+    contact_data: Dict[str, str],
+    ats_keywords: Optional[List[str]] = None,
+    project_links: Optional[Dict[str, str]] = None,
+    source_resume_filename: Optional[str] = None,
+):
     logger.info("Adding projects to DOCX...")
     add_section_header_docx(document, "PROJECTS")
     if not projects_text or not projects_text.strip():
@@ -413,11 +499,14 @@ def add_projects_docx(document, projects_text: str, contact_data: Dict[str, str]
         logger.warning("Projects text is empty after cleaning headers.")
         return
 
-    github_base_url = contact_data.get("github_url", "https://github.com/DefaultUser")
-    project_hyperlinks = {
-        "Intelligent Building Code QA": "https://virginia-building-codes.streamlit.app/",
-        "AI-Text Discriminator": f"{github_base_url}/AI-Content-Filter"
-    }
+    github_base_url = contact_data.get("github_url", "https://github.com/DefaultUser").rstrip('/')
+    # Prefer links extracted from the user's resume text
+    safe_links = project_links or {}
+    # If this is the user's own resume (filename contains these names), we can add a conservative fallback
+    is_user_resume = False
+    if source_resume_filename:
+        lower_name = source_resume_filename.lower()
+        is_user_resume = ("shanmugam" in lower_name) or ("venkatesh" in lower_name)
     
     project_entries = re.split(r'\n\s*\n+(?=\s*(?:\*\*)?[A-Z0-9][\w\s\-()]+?(?:\*\*)?\s*(?:\||\n))', cleaned_projects_text)
     
@@ -428,12 +517,19 @@ def add_projects_docx(document, projects_text: str, contact_data: Dict[str, str]
         if not lines: continue
             
         title_line = lines[0]
+        # Remove trailing taglines like "| _NLP, RAG_"
         title_parts = title_line.split('|', 1)
         project_name_raw = re.sub(r"^\*\*(.*?)\*\*$", r"\1", title_parts[0].strip())
 
         p_title = document.add_paragraph()
         p_title.paragraph_format.widow_control = True
-        project_url = project_hyperlinks.get(project_name_raw)
+        project_url = safe_links.get(project_name_raw)
+        # User-specific conservative fallback: only add obvious GitHub repo for known project
+        if not project_url and is_user_resume and project_name_raw == "AI-Text Discriminator":
+            project_url = f"{github_base_url}/AI-Content-Filter"
+        # Known public demo link for Building Codes RAG app (only for owner's resume)
+        if not project_url and is_user_resume and project_name_raw == "Agentic Graph RAG for Building Codes":
+            project_url = "https://vabuildingcode.netlify.app/"
         
         if project_url:
             add_hyperlink(p_title, project_url, project_name_raw,
@@ -441,12 +537,9 @@ def add_projects_docx(document, projects_text: str, contact_data: Dict[str, str]
                           is_bold=True, color_hex="0563C1", is_underline=True)
         else:
             add_runs_with_markdown_bold(p_title, project_name_raw, 'Times New Roman', Pt(10), base_bold=True)
-            logger.warning(f"No hyperlink found for project: {project_name_raw}")
+            logger.warning(f"No hyperlink used for project: {project_name_raw}")
             
-        if len(title_parts) > 1 and title_parts[1].strip():
-            tagline_text = title_parts[1].strip().replace("_", "")
-            p_title.add_run(" | ").font.name = 'Times New Roman'
-            add_runs_with_markdown_bold(p_title, tagline_text, 'Times New Roman', Pt(10), base_italic=True)
+        # Taglines removed per request
             
         p_title.paragraph_format.space_after = Pt(2)
         p_title.paragraph_format.keep_with_next = True
@@ -454,7 +547,8 @@ def add_projects_docx(document, projects_text: str, contact_data: Dict[str, str]
         for i in range(1, len(lines)):
             line = lines[i]
             if line.startswith('*'):
-                add_styled_paragraph(document, line[1:].strip(), style_name='List Bullet',
+                bullet_text = _apply_keyword_bolding(line[1:].strip(), ats_keywords)
+                add_styled_paragraph(document, bullet_text, style_name='List Bullet',
                                      font_name='Times New Roman', font_size=Pt(10),
                                      space_after=Pt(2), line_spacing=1.15)
         if len(lines) > 1 and document.paragraphs:
@@ -469,10 +563,11 @@ def add_education_docx(document, education_list: List[Dict[str, str]]):
         add_styled_paragraph(document, "N/A", font_size=Pt(10))
         return
 
-    right_tab_stop = Inches(7.4) # Adjust as needed
+    date_tab_stop = Inches(5.2)
     for edu_item in education_list:
         p_edu_line = document.add_paragraph()
-        p_edu_line.paragraph_format.tab_stops.add_tab_stop(right_tab_stop, WD_ALIGN_PARAGRAPH.RIGHT)
+        p_edu_line.paragraph_format.tab_stops.clear_all()
+        p_edu_line.paragraph_format.tab_stops.add_tab_stop(Inches(7.2), WD_TAB_ALIGNMENT.RIGHT)
         p_edu_line.paragraph_format.widow_control = True
         degree_str = edu_item.get('degree_line', 'Degree N/A')
         uni_str = edu_item.get('university_line', 'University N/A')
@@ -497,6 +592,7 @@ def generate_pdf_via_google_drive(
     converts to Google Doc, exports as PDF, saves it locally, and cleans up Drive files.
     Returns the path to the locally saved PDF or None on failure.
     """
+    # Primary: Google Drive conversion
     drive_service = get_drive_service()
     if not drive_service:
         logger.error("Could not get Google Drive service. PDF generation via Drive failed.")
@@ -560,6 +656,14 @@ def generate_pdf_via_google_drive(
             except OSError as e_remove:
                 logger.warning(f"Could not remove local temporary DOCX: {e_remove}")
 
+def ensure_one_page_pdf(pdf_path: str) -> bool:
+    try:
+        reader = PdfReader(pdf_path)
+        return len(reader.pages) == 1
+    except Exception as e:
+        logger.warning(f"Failed to inspect PDF page count: {e}")
+        return False
+
 
 # --- Main PDF Generation Functions (MODIFIED to use Google Drive conversion) ---
 
@@ -570,27 +674,28 @@ def generate_styled_resume_pdf(
     output_pdf_directory: str,
     target_company_name: Optional[str] = None, # Used in filename
     years_of_experience: Optional[int] = None, # Used in filename
-    filename_keyword: str = "Resume" # Base keyword for the filename
+    filename_keyword: str = "Resume", # Base keyword for the filename
+    compact: bool = False
 ) -> Optional[str]:
 
     logger.info(f"Starting styled RESUME PDF generation using Google Drive. Output dir: '{output_pdf_directory}'")
     document = Document()
     # (Setup styles and margins as before - this part is for python-docx DOCX creation)
     normal_style = document.styles['Normal']
-    normal_font = normal_style.font; normal_font.name = 'Times New Roman'; normal_font.size = Pt(10)
+    normal_font = normal_style.font; normal_font.name = 'Times New Roman'; normal_font.size = Pt(9 if compact else 10)
     ct_style_rpr = normal_style.element.get_or_add_rPr()
     ct_style_fonts = ct_style_rpr.get_or_add_rFonts()
     for attr in [qn('w:asciiTheme'), qn('w:hAnsiTheme'), qn('w:eastAsiaTheme'), qn('w:cstheme')]:
         if attr in ct_style_fonts.attrib: del ct_style_fonts.attrib[attr]
     ct_style_fonts.set(qn('w:ascii'), 'Times New Roman'); ct_style_fonts.set(qn('w:hAnsi'), 'Times New Roman')
     ct_style_fonts.set(qn('w:cs'), 'Times New Roman'); ct_style_fonts.set(qn('w:eastAsia'), 'Times New Roman')
-    normal_style.paragraph_format.space_before = Pt(0); normal_style.paragraph_format.space_after = Pt(2)
-    normal_style.paragraph_format.line_spacing = 1.15
+    normal_style.paragraph_format.space_before = Pt(0); normal_style.paragraph_format.space_after = Pt(1 if compact else 2)
+    normal_style.paragraph_format.line_spacing = 1.05 if compact else 1.15
     normal_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     try:
         list_bullet_style = document.styles['List Bullet']
-        lb_font = list_bullet_style.font; lb_font.name = 'Times New Roman'; lb_font.size = Pt(10)
+        lb_font = list_bullet_style.font; lb_font.name = 'Times New Roman'; lb_font.size = Pt(9 if compact else 10)
         lb_ct_style_rpr = list_bullet_style.element.get_or_add_rPr()
         lb_ct_style_fonts = lb_ct_style_rpr.get_or_add_rFonts()
         for attr in [qn('w:asciiTheme'), qn('w:hAnsiTheme'), qn('w:eastAsiaTheme'), qn('w:cstheme')]:
@@ -598,23 +703,31 @@ def generate_styled_resume_pdf(
         lb_ct_style_fonts.set(qn('w:ascii'), 'Times New Roman'); lb_ct_style_fonts.set(qn('w:hAnsi'), 'Times New Roman')
         lb_ct_style_fonts.set(qn('w:cs'), 'Times New Roman'); lb_ct_style_fonts.set(qn('w:eastAsia'), 'Times New Roman')
         list_bullet_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        list_bullet_style.paragraph_format.line_spacing = 1.15
+        list_bullet_style.paragraph_format.line_spacing = 1.05 if compact else 1.15
         list_bullet_style.paragraph_format.left_indent = Inches(0.25)
         list_bullet_style.paragraph_format.first_line_indent = Inches(-0.25)
     except KeyError:
         logger.warning("'List Bullet' style not found. Bulleted lists may not be properly formatted.")
 
     for section_elm in document.sections:
-        section_elm.left_margin = Inches(0.51); section_elm.right_margin = Inches(0.51)
-        section_elm.top_margin = Inches(0.13); section_elm.bottom_margin = Inches(0.06)
+        section_elm.left_margin = Inches(0.45 if compact else 0.51); section_elm.right_margin = Inches(0.45 if compact else 0.51)
+        section_elm.top_margin = Inches(0.1 if compact else 0.13); section_elm.bottom_margin = Inches(0.05 if compact else 0.06)
     
-    # Add content to the DOCX document
+    # Add content to the DOCX document in enforced order
     add_contact_info_docx(document, contact_info)
-    if tailored_data.get("summary"): add_summary_docx(document, tailored_data["summary"])
-    if tailored_data.get("work_experience"): add_work_experience_docx(document, tailored_data["work_experience"])
-    if tailored_data.get("technical_skills"): add_technical_skills_docx(document, tailored_data["technical_skills"])
-    if tailored_data.get("projects"): add_projects_docx(document, tailored_data["projects"], contact_info)
+    if tailored_data.get("summary"): add_summary_docx(document, tailored_data["summary"], tailored_data.get("ats_keywords"))
+    if tailored_data.get("technical_skills"): add_technical_skills_docx(document, tailored_data["technical_skills"], tailored_data.get("ats_keywords"))
+    if tailored_data.get("work_experience"): add_work_experience_docx(document, tailored_data["work_experience"], tailored_data.get("ats_keywords"))
     add_education_docx(document, education_info)
+    if tailored_data.get("projects"): 
+        add_projects_docx(
+            document,
+            tailored_data["projects"],
+            contact_info,
+            tailored_data.get("ats_keywords"),
+            tailored_data.get("project_links"),
+            tailored_data.get("source_resume_filename")
+        )
 
     # Construct the base filename for the PDF
     candidate_last_name = contact_info.get("name", "Candidate").split()[-1] if contact_info.get("name") else "Resume"
@@ -634,7 +747,8 @@ def generate_styled_resume_pdf(
     base_pdf_filename = f"{filename_keyword}_{company_str}_{candidate_last_name}_{yoe_str}YOE"
     base_pdf_filename = re.sub(r'[^\w\.\-_]', '_', base_pdf_filename) # Sanitize
 
-    return generate_pdf_via_google_drive(document, output_pdf_directory, base_pdf_filename)
+    pdf_path = generate_pdf_via_google_drive(document, output_pdf_directory, base_pdf_filename)
+    return pdf_path
 
 # In Resume_Tailoring/src/docx_to_pdf_generator.py
 # Make sure all necessary imports like re, os, logging, Document, Pt, Inches, WD_ALIGN_PARAGRAPH, qn,
@@ -649,7 +763,8 @@ def generate_cover_letter_pdf(
     company_name: str,
     output_pdf_directory: str,
     filename_keyword: str = "CoverLetter",
-    years_of_experience: Optional[int] = None
+    years_of_experience: Optional[int] = None,
+    compact: bool = False
 ) -> Optional[str]:
 
     logger.info(f"Starting styled COVER LETTER PDF generation. Output dir: '{output_pdf_directory}'")
@@ -660,7 +775,7 @@ def generate_cover_letter_pdf(
     normal_style = document.styles['Normal']
     normal_font = normal_style.font
     normal_font.name = 'Times New Roman'
-    normal_font.size = Pt(11)
+    normal_font.size = Pt(10 if compact else 11)
 
     ct_style_rpr = normal_style.element.get_or_add_rPr()
     ct_style_fonts = ct_style_rpr.get_or_add_rFonts()
@@ -679,15 +794,15 @@ def generate_cover_letter_pdf(
 
     normal_style.paragraph_format.space_before = Pt(0)
     normal_style.paragraph_format.space_after = Pt(0)
-    normal_style.paragraph_format.line_spacing = 1.15
+    normal_style.paragraph_format.line_spacing = 1.05 if compact else 1.15
     normal_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
     normal_style.paragraph_format.widow_control = True
 
     for section_elm in document.sections:
-        section_elm.left_margin = Inches(1)
-        section_elm.right_margin = Inches(1)
-        section_elm.top_margin = Inches(0.75) 
-        section_elm.bottom_margin = Inches(0.75)
+        section_elm.left_margin = Inches(0.6 if compact else 1)
+        section_elm.right_margin = Inches(0.6 if compact else 1)
+        section_elm.top_margin = Inches(0.5 if compact else 0.75) 
+        section_elm.bottom_margin = Inches(0.5 if compact else 0.75)
 
     # --- Create Traditional Letterhead Style Top Contact Block (Street Address Omitted) ---
     letterhead_font_name = 'Times New Roman'
@@ -773,7 +888,7 @@ def generate_cover_letter_pdf(
                 add_styled_paragraph(document, processed_para_text,
                                      font_name='Times New Roman', font_size=Pt(11),
                                      alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
-                                     space_after=Pt(8), line_spacing=1.15)
+            space_after=Pt(6 if compact else 8), line_spacing=(1.05 if compact else 1.15))
     else:
         add_styled_paragraph(document, "[Cover letter body content was not generated or was stripped with the signature.]",
                              font_name='Times New Roman', font_size=Pt(11))
@@ -860,4 +975,5 @@ def generate_cover_letter_pdf(
     base_pdf_filename = f"{filename_keyword}_{company_str}_{candidate_last_name}"
     base_pdf_filename = re.sub(r'[^\w\.\-_]', '_', base_pdf_filename)
 
-    return generate_pdf_via_google_drive(document, output_pdf_directory, base_pdf_filename)
+    pdf_path = generate_pdf_via_google_drive(document, output_pdf_directory, base_pdf_filename)
+    return pdf_path

@@ -3,7 +3,7 @@ import logging
 from typing import Optional, Tuple # Import Tuple for return type hint
 
 from models import JobDescription, ResumeSections
-from utils.llm_gemini import GeminiClient, get_section_prompt
+from utils.llm_gemini import GeminiClient, get_section_prompt, LLMRouter
 import re
 class TailoringAgent:
     """
@@ -11,7 +11,8 @@ class TailoringAgent:
     maintaining state of previously tailored sections for context, and utilizing ATS keywords
     and an optional master profile.
     """
-    def __init__(self, llm_client: GeminiClient):
+    def __init__(self, llm_client):
+        # Accept GeminiClient or LLMRouter
         self.llm = llm_client
         self.sections_to_tailor = ['summary', 'work_experience', 'technical_skills', 'projects']
 
@@ -81,11 +82,20 @@ class TailoringAgent:
 
                 raw_llm_output = ""
                 try:
-                    raw_llm_output = self.llm.generate_text(
-                        prompt, 
-                        temperature=0.15, 
-                        max_tokens=max_tokens_for_section
-                    )
+                    # Router supports generate(); GeminiClient supports generate_text()
+                    if hasattr(self.llm, 'generate'):
+                        raw_llm_output = self.llm.generate(
+                            prompt,
+                            temperature=0.15,
+                            max_tokens=max_tokens_for_section,
+                            task=f"tailor_{section_name}"
+                        )
+                    else:
+                        raw_llm_output = self.llm.generate_text(
+                            prompt,
+                            temperature=0.15,
+                            max_tokens=max_tokens_for_section
+                        )
                 except Exception as e:
                     logging.error(f"LLM call failed for section '{section_name}': {e}", exc_info=True)
                     raw_llm_output = original_content or "" 

@@ -1,0 +1,122 @@
+Machine Learning Engineer, Roku TV
+position
+San Jose, CA
+time
+Full-time
+remote
+Hybrid
+seniority
+Entry Level
+money
+$130K/yr - $200K/yr
+date
+1+ years exp
+88%
+STRONG MATCH
+100%
+Exp. Level
+80%
+Skill
+46%
+Industry Exp.
+ftfMaximize your interview chances
+Roku is the #1 TV streaming platform in the U.S., Canada, and Mexico, focused on connecting the entire TV ecosystem. They are seeking a creative and passionate Machine Learning Engineer to explore and implement AI-driven improvements in Picture Quality and Audio Quality for Roku TV, applying advanced ML techniques to enhance streaming experiences for millions of users worldwide.
+
+
+Advertising
+Advertising Platforms
+Consumer Electronics
+Digital Entertainment
+Digital Media
+Hardware
+Media and Entertainment
+Software
+Video Streaming
+check
+Comp. & Benefits
+check
+H1B Sponsor Likelynote
+
+Insider Connection @Roku
+turboUnlimited
+Discover valuable connections within the company who might provide insights and potential referrals.
+Get 3x more responses when you reach out via email instead of LinkedIn.
+Beyond your network
+R
+D
+K
+M
+P
+Robert Ormandi & 4 connections
+From your previous company
+P
+S
+M
+P
+P
+Poornima Chozhiyath Raman & 4 connections
+Previously@Tata Consultancy Services and...
+from your School
+J
+J
+J
+R
+E
+Jiaying L. & 4 connections
+@The George Washington University and...
+Find Any Email
+
+Responsibilities
+Explore and implement AI-driven Picture Quality and Audio Quality improvements for Roku TV
+Apply advanced ML techniques in the optimization of models to enhance video and audio processing pipelines
+Research, understand, and implement technical papers on ML/DL to solve complex challenges
+Collaborate with engineering teams and cross-functional partners to translate business requirements into technical solutions
+Run experiments and analyze results against critical business KPIs
+
+Qualification
+check
+Represents the skills you have
+Find out how your skills align with this job's requirements. If anything seems off, you can easily click on the tags to select or unselect skills to reflect your actual expertise.
+
+checkMachine Learning
+checkDeep Learning
+checkTensorFlow
+checkPyTorch
+C++
+checkPython
+Video Processing
+Audio Processing
+Research Background
+checkAI Literacy
+checkCommunication
+checkWork Ethic
+Required
+1+ years of experience applying Machine Learning to concrete problems at scale
+Strong CS fundamentals; ability to write efficient algorithms with ease
+Hands-on experience with Machine Learning / Deep Learning frameworks like TensorFlow or PyTorch
+Proficiency in coding firmware development using C++
+Proficiency in coding ML/DL algorithms using Python
+Solid understanding of DL fundamentals, including RNN, CNN, and multi-modal models
+Familiarity with video processing pipelines and audio pipelines
+AI literacy and curiosity—whether through previous work or personal exploration
+Excellent communication skills, strong work ethic, and works with minimum supervision
+Have hands-on experience with edge devices like jetson nano, kadas, and similar
+Preferred
+Research background preferred; ability to understand and implement technical papers on ML/DL
+Published papers in the field of ML/DL are a bonus
+Hold an MS or PhD in Computer Science, Electrical Engineering, or related fields - Preferred
+
+Benefits
+Health insurance
+Equity awards
+Life insurance
+Disability benefits
+Parental leave
+Wellness benefits
+Paid time off
+Healthcare (medical, dental, and vision)
+Life
+Accident
+Disability
+Commuter
+Retirement options (401(k)/pension)

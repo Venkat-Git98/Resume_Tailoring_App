@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import json
+import re
+from typing import Dict, Optional
 import tempfile
 import base64
 from pathlib import Path
@@ -61,7 +63,7 @@ if CONFIG_MODE != 'error':
         from agents.cover_letter_agent import CoverLetterAgent
         from src.pdf_generator import generate_pdf_from_json_xhtml2pdf # CORRECTED: Import function
         from src.docx_to_pdf_generator import generate_styled_resume_pdf, generate_pdf_via_google_drive, generate_cover_letter_pdf as generate_styled_cover_letter_pdf # Import actual functions including sophisticated cover letter function
-        from utils.llm_gemini import GeminiClient
+        from utils.llm_gemini import GeminiClient, LLMRouter
         from utils.gcs_utils import get_gcs_client, upload_file_to_gcs # CORRECTED: Import functions
         from models import ResumeSections, JobDescription # CORRECTED: Removed Resume
         print("Successfully imported other project modules (agents, src, utils, models).")
@@ -307,16 +309,17 @@ def run_tailoring_process(job_description_text: str, resume_input, professional_
             # Instantiate GeminiClient
             llm_model_name = getattr(CONFIG, 'GEMINI_MODEL_FOR_TAILORING', "gemini-1.5-pro-001")
             
+            # Initialize Router which tries Gemini and falls back to OpenRouter
             try:
-                llm_client = GeminiClient(api_key=gemini_api_key, model_name=llm_model_name) 
-                st.info(f"GeminiClient initialized with model: {llm_model_name}.")
+                router = LLMRouter(gemini_api_key=gemini_api_key, gemini_model=llm_model_name)
+                st.info("LLM Router initialized (Gemini with OpenRouter fallback).")
             except Exception as e:
-                st.error(f"Failed to initialize GeminiClient: {e}")
+                st.error(f"Failed to initialize LLM Router: {e}")
                 return None, None, None, None
 
             # --- Agent Processing ---
             st.info("Analyzing Job Description...")
-            jd_analyzer = JDAnalysisAgent(llm_client)
+            jd_analyzer = JDAnalysisAgent(None)
             jd_analysis_result = jd_analyzer.run(jd_txt_path=temp_jd_path) 
             if not isinstance(jd_analysis_result, JobDescription) or not jd_analysis_result.job_title: 
                 st.error(f"Failed to analyze job description or got unexpected result type: {type(jd_analysis_result)}")
@@ -332,7 +335,7 @@ def run_tailoring_process(job_description_text: str, resume_input, professional_
             st.success("Uploaded Resume Parsed.")
 
             st.info("Tailoring Resume...")
-            tailoring_agent = TailoringAgent(llm_client=llm_client) 
+            tailoring_agent = TailoringAgent(llm_client=router) 
             tailored_resume_sections, _ = tailoring_agent.run(
                 job_desc=jd_analysis_result, 
                 resume=parsed_uploaded_resume_sections,
@@ -343,14 +346,43 @@ def run_tailoring_process(job_description_text: str, resume_input, professional_
                 return None, None, None, None
             st.success("Resume Tailored.")
 
-            tailored_resume_json_data = tailored_resume_sections.dict() 
+            tailored_resume_json_data = tailored_resume_sections.dict()
+            # Attach ATS keywords to pass into DOCX generator for programmatic bolding
+            try:
+                if hasattr(jd_analysis_result, 'ats_keywords') and isinstance(jd_analysis_result.ats_keywords, list):
+                    tailored_resume_json_data['ats_keywords'] = jd_analysis_result.ats_keywords
+            except Exception:
+                pass
+            # Attach project links from the original resume if any, and the source resume filename
+            try:
+                from utils import file_utils
+                project_links: Dict[str, str] = {}
+                if temp_resume_path and temp_resume_path.lower().endswith('.pdf'):
+                    raw_resume_text = file_utils.read_pdf_text(temp_resume_path)
+                    # Simple heuristic: lines that look like project titles followed by a URL on the same or next line
+                    last_title: Optional[str] = None
+                    for line in raw_resume_text.splitlines():
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        if stripped and not stripped.startswith('http') and len(stripped) <= 80 and stripped[0].isupper() and ' ' in stripped:
+                            # consider as potential title
+                            last_title = stripped.replace('**','').split('|',1)[0].strip()
+                        url_match = re.search(r'(https?://\S+)', stripped)
+                        if url_match and last_title:
+                            project_links[last_title] = url_match.group(1)
+                            last_title = None
+                tailored_resume_json_data['project_links'] = project_links
+                tailored_resume_json_data['source_resume_filename'] = resume_file_name
+            except Exception:
+                pass
 
             temp_tailored_resume_json_path = os.path.join(temp_dir, "tailored_resume.json")
             with open(temp_tailored_resume_json_path, "w", encoding="utf-8") as f_json:
                 json.dump(tailored_resume_json_data, f_json, indent=4)
 
             st.info("Generating Cover Letter...")
-            cover_letter_agent = CoverLetterAgent(llm_client=llm_client)
+            cover_letter_agent = CoverLetterAgent(llm_client=router)
             contact_info_for_cl = getattr(CONFIG, 'PREDEFINED_CONTACT_INFO', {})
             if not contact_info_for_cl:
                 st.warning("PREDEFINED_CONTACT_INFO not found in config. Cover letter might be incomplete.")
@@ -396,7 +428,23 @@ def run_tailoring_process(job_description_text: str, resume_input, professional_
                 if not final_resume_pdf_path_temp or not os.path.exists(final_resume_pdf_path_temp):
                     st.error(f"Failed to generate resume PDF via Google Drive.")
                     return None, None, None, None
-                    
+                # One-page enforcement for resume
+                try:
+                    from src.docx_to_pdf_generator import ensure_one_page_pdf
+                    if not ensure_one_page_pdf(final_resume_pdf_path_temp):
+                        st.warning("Resume exceeded one page. Regenerating in compact mode...")
+                        final_resume_pdf_path_temp = generate_styled_resume_pdf(
+                            tailored_data=tailored_resume_json_data,
+                            contact_info=contact_info_for_pdf,
+                            education_info=education_info_for_pdf,
+                            output_pdf_directory=temp_dir,
+                            target_company_name=jd_analysis_result.company_name if hasattr(jd_analysis_result, 'company_name') else None,
+                            years_of_experience=4,
+                            filename_keyword="TailoredResume",
+                            compact=True
+                        )
+                except Exception:
+                    pass
                 st.success(f"Resume PDF generated via Google Drive: {os.path.basename(final_resume_pdf_path_temp)}")
 
             except Exception as e:
@@ -425,13 +473,32 @@ def run_tailoring_process(job_description_text: str, resume_input, professional_
                         filename_keyword="CoverLetter",
                         years_of_experience=4  # You can make this configurable
                     )
-                    
+                    # One-page enforcement for CL
                     if generated_cl_pdf_actual_path and os.path.exists(generated_cl_pdf_actual_path):
-                        st.success(f"Cover Letter PDF generated with professional formatting: {os.path.basename(generated_cl_pdf_actual_path)}")
+                        try:
+                            from src.docx_to_pdf_generator import ensure_one_page_pdf
+                            if not ensure_one_page_pdf(generated_cl_pdf_actual_path):
+                                st.warning("Cover Letter exceeded one page. Regenerating in compact mode...")
+                                generated_cl_pdf_actual_path = generate_styled_cover_letter_pdf(
+                                    cover_letter_body_text=cover_letter_text,
+                                    contact_info=contact_info_for_pdf,
+                                    job_title=job_title,
+                                    company_name=company_name,
+                                    output_pdf_directory=temp_dir,
+                                    filename_keyword="CoverLetter",
+                                    years_of_experience=4,
+                                    compact=True
+                                )
+                        except Exception:
+                            pass
+                        if generated_cl_pdf_actual_path and os.path.exists(generated_cl_pdf_actual_path):
+                            st.success(f"Cover Letter PDF generated with professional formatting: {os.path.basename(generated_cl_pdf_actual_path)}")
+                        else:
+                            st.warning("Cover Letter PDF generation failed - file not created")
+                            generated_cl_pdf_actual_path = None
                     else:
                         st.warning("Cover Letter PDF generation failed - file not created")
                         generated_cl_pdf_actual_path = None
-                        
                 except Exception as e:
                     st.error(f"Error during cover letter PDF generation: {e}")
                     import traceback
@@ -548,7 +615,14 @@ else:
     st.header("1. Input Job Description")
     job_description = st.text_area("Paste the full job description here:", height=250, key="job_desc_input")
 
-    st.header("2. Upload Your Current Resume")
+    st.header("2. Select Role & Provide Resume")
+    # Simple role selector (no nested tabs/buttons)
+    selected_role = st.radio(
+        "Target role for tailoring:",
+        ["Machine Learning", "Data Scientist"],
+        horizontal=True,
+        key="target_role"
+    )
 
     # Resume input options
     resume_input_method = st.radio(
@@ -560,8 +634,14 @@ else:
     uploaded_resume = None
     resume_path_to_use = None
     resume_source_name = ""
+    master_pdf_context_text = None
 
-    default_resume_path = getattr(CONFIG, 'DEFAULT_BASE_RESUME_PDF_PATH', None)
+    # Determine default resume path based on selected role
+    default_resume_path = None
+    if selected_role == "Machine Learning":
+        default_resume_path = os.path.join(CONFIG.PROJECT_ROOT, "Shanmugam_ML_2025_4_YOE_M.pdf")
+    elif selected_role == "Data Scientist":
+        default_resume_path = os.path.join(CONFIG.PROJECT_ROOT, "Shanmugam_DS_2025_4_YOE_M.pdf")
     default_resume_exists = default_resume_path and os.path.exists(default_resume_path)
 
     if resume_input_method == "Upload file":
@@ -576,11 +656,33 @@ else:
             resume_path_to_use = default_resume_path
             resume_source_name = os.path.basename(default_resume_path)
             st.info(f"✅ Using default resume file: {resume_source_name}")
+            # Optional master resume context toggle
+            use_master_pdf = st.checkbox(
+                "Also use master resume context (Untitled Resume (2).pdf)", value=True, key="use_master_pdf_context"
+            )
+            if use_master_pdf:
+                try:
+                    master_pdf_path = os.path.join(CONFIG.PROJECT_ROOT, "Untitled Resume (2).pdf")
+                    if os.path.exists(master_pdf_path):
+                        mtime = os.path.getmtime(master_pdf_path)
+                        cached_mtime = st.session_state.get('master_pdf_mtime')
+                        cached_text = st.session_state.get('master_pdf_text')
+                        if cached_text and cached_mtime == mtime:
+                            master_pdf_context_text = cached_text
+                        else:
+                            from utils import file_utils
+                            master_pdf_context_text = file_utils.read_pdf_text(master_pdf_path)
+                            st.session_state['master_pdf_text'] = master_pdf_context_text
+                            st.session_state['master_pdf_mtime'] = mtime
+                        st.caption("Master resume context loaded for tailoring.")
+                    else:
+                        st.caption("Master resume context file not found. Proceeding without it.")
+                except Exception as e:
+                    st.warning(f"Could not load master resume context: {e}")
         else:
             st.warning("Default resume file not found. Please upload a file.")
-            # Automatically switch back to upload if default not found
-            st.session_state.resume_method = "Upload file"
-            st.experimental_rerun() # Rerun to update the UI
+            # Avoid mutating session_state after widgetInstantiation; show helper text instead
+            st.caption("Switch to 'Upload file' above and select your resume.")
 
     st.header("3. Professional Background (Optional)")
     st.markdown("*This helps tailor your resume more effectively, but you can proceed without it.*")
@@ -689,13 +791,18 @@ else:
             resume_input_to_use = uploaded_resume if resume_input_method == "Upload file" else resume_path_to_use
             
             # Show what will be used
-            if professional_background_content:
-                st.info("🎯 Tailoring will use your professional background for enhanced customization.")
+            combined_master_context = None
+            if professional_background_content or master_pdf_context_text:
+                parts = []
+                if master_pdf_context_text: parts.append(master_pdf_context_text)
+                if professional_background_content: parts.append(professional_background_content)
+                combined_master_context = "\n\n".join(parts)
+                st.info("🎯 Tailoring will use master resume context for enhanced customization.")
             else:
                 st.info("📝 Proceeding without professional background - using only resume and job description.")
                 
             with st.spinner("Processing... This may take a few minutes..."):
-                result = run_tailoring_process(job_description, resume_input_to_use, professional_background_content, resume_filename, cover_letter_filename)
+                result = run_tailoring_process(job_description, resume_input_to_use, combined_master_context, resume_filename, cover_letter_filename)
                 # Initialize to ensure they exist even if result is None
                 resume_pdf_bytes, cl_pdf_bytes, gcs_resume_path, gcs_cl_path = None, None, None, None
 

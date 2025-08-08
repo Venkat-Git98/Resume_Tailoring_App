@@ -4,11 +4,11 @@ import re
 from typing import List, Optional, Tuple # Added Tuple
 
 from models import JobDescription, ResumeSections, ResumeCritique
-from utils.llm_gemini import GeminiClient, get_resume_critique_prompt
+from utils.llm_gemini import GeminiClient, get_resume_critique_prompt, LLMRouter
 
 class ResumeJudgeAgent:
     """Agent to critique a tailored resume against a job description using an LLM."""
-    def __init__(self, llm_client: GeminiClient):
+    def __init__(self, llm_client):
         self.llm = llm_client
 
     def _parse_critique_text(self, critique_text: str) -> ResumeCritique:
@@ -84,7 +84,10 @@ class ResumeJudgeAgent:
                 candidate_name=candidate_name
             )
 
-            raw_critique_text_output = self.llm.generate_text(prompt, temperature=0.1, max_tokens=300) # Reduced max_tokens for concise output
+            if hasattr(self.llm, 'generate'):
+                raw_critique_text_output = self.llm.generate(prompt, temperature=0.1, max_tokens=300, task="judge_resume")
+            else:
+                raw_critique_text_output = self.llm.generate_text(prompt, temperature=0.1, max_tokens=300)
             
             # --- ADDED DEBUG LOGGING --- 
             logging.info(f"ResumeJudgeAgent DEBUG: Raw LLM output for critique:\n---\n{raw_critique_text_output}\n---")

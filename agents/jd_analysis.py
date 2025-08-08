@@ -1,6 +1,7 @@
 # Resume_Tailoring/agents/jd_analysis.py
 import logging
 from typing import List, Optional
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Assuming your project structure allows these imports
 # If these are in Resume_Tailoring/utils, the path might need adjustment
@@ -8,20 +9,24 @@ from typing import List, Optional
 # For this example, assuming direct importability if Resume_Tailoring is in PYTHONPATH
 from utils.file_utils import read_text_file # Assuming read_text_file is what you use
 from models import JobDescription
-from utils.llm_gemini import GeminiClient
+from utils.llm_gemini import GeminiClient, LLMRouter
 
 class JDAnalysisAgent:
     """Agent to analyze the job description text and extract key information, including ATS keywords."""
 
     def __init__(self, llm_client: GeminiClient):
         if not llm_client:
-            logging.warning("JDAnalysisAgent initialized without an LLM client. ATS keyword extraction via LLM will fail.")
-            # Consider: raise ValueError("JDAnalysisAgent requires an llm_client instance.")
+            logging.warning("JDAnalysisAgent initialized without an LLM client. ATS keyword extraction via LLM will use router if available.")
         self.llm_client = llm_client
+        # Router as fallback / primary if Gemini missing
+        try:
+            self.router = LLMRouter()
+        except Exception:
+            self.router = None
 
     def _extract_ats_keywords_with_llm(self, jd_text: str, job_title: Optional[str]) -> List[str]:
-        if not self.llm_client:
-            logging.warning("LLM client not available in JDAnalysisAgent; cannot extract ATS keywords via LLM.")
+        if not self.llm_client and not self.router:
+            logging.warning("No LLM available for ATS keyword extraction.")
             return []
 
         prompt = f"""
@@ -75,12 +80,34 @@ Job Description:
 Comma-separated ATS keywords:
 """
         try:
-            response = self.llm_client.generate_text(prompt, temperature=0.1, max_tokens=200)
+            if self.llm_client:
+                response = self.llm_client.generate_text(prompt, temperature=0.1, max_tokens=200)
+            else:
+                response = self.router.generate(prompt, temperature=0.1, max_tokens=200, task="ats_extract")
             keywords = [kw.strip() for kw in response.split(',') if kw.strip()]
             logging.info(f"Extracted {len(keywords)} ATS keywords via LLM: {keywords}")
             return keywords
         except Exception as e:
             logging.error(f"Failed to extract ATS keywords via LLM: {e}", exc_info=True)
+            return []
+
+    def _extract_ats_keywords_with_stats(self, jd_text: str, max_terms: int = 20) -> List[str]:
+        try:
+            vectorizer = TfidfVectorizer(ngram_range=(1,3), stop_words='english', min_df=1, max_df=1.0)
+            X = vectorizer.fit_transform([jd_text])
+            feature_array = vectorizer.get_feature_names_out()
+            scores = X.toarray()[0]
+            ranked = sorted(zip(feature_array, scores), key=lambda x: x[1], reverse=True)
+            # Heuristic filters: prefer letter/digit combos and length <= 4 words
+            terms: List[str] = []
+            for term, _ in ranked:
+                if len(terms) >= max_terms:
+                    break
+                if any(c.isalpha() for c in term) and len(term.split()) <= 4:
+                    terms.append(term.strip())
+            return terms
+        except Exception as e:
+            logging.warning(f"Statistical ATS extraction failed: {e}")
             return []
 
     # *** MODIFIED run method signature and logic ***
@@ -131,16 +158,31 @@ Comma-separated ATS keywords:
         logging.info(f"JDAnalysisAgent DEBUG: Extracted job_title: {repr(job_title_extracted)}")
         logging.info(f"JDAnalysisAgent DEBUG: Requirements count: {len(requirements_extracted_as_list)}")
 
-        ats_keywords_extracted = []
-        if self.llm_client:
+        ats_keywords_extracted: List[str] = []
+        if self.llm_client or self.router:
             ats_keywords_extracted = self._extract_ats_keywords_with_llm(final_jd_text_content, job_title_extracted)
         else:
-            logging.warning("JDAnalysisAgent: LLM client not available. Cannot extract ATS keywords.")
+            logging.warning("JDAnalysisAgent: No LLM available. Skipping LLM-based ATS extraction.")
+
+        # Hybrid: add statistical keyphrases and dedupe
+        stats_keywords = self._extract_ats_keywords_with_stats(final_jd_text_content)
+        combined = []
+        seen = set()
+        for kw in (ats_keywords_extracted + stats_keywords):
+            norm = kw.strip()
+            if not norm:
+                continue
+            if norm.lower() in seen:
+                continue
+            seen.add(norm.lower())
+            combined.append(norm)
+            if len(combined) >= 25:
+                break
 
         job_desc_data = {
             "job_title": job_title_extracted,
             "requirements": requirements_extracted_as_list,
-            "ats_keywords": ats_keywords_extracted
+            "ats_keywords": combined
         }
         
         job_desc = JobDescription(**job_desc_data)

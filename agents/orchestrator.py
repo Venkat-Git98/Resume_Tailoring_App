@@ -3,17 +3,18 @@ import logging
 from typing import Optional, Dict, Tuple
 
 # Project-internal imports
-from utils.llm_gemini import GeminiClient
+from utils.llm_gemini import GeminiClient, LLMRouter
 from models import TailoringState, ResumeSections, JobDescription, ResumeCritique
 from .jd_analysis import JDAnalysisAgent # Relative import within 'agents' package
 from .resume_parser import ResumeParserAgent # Relative import within 'agents' package
 from .resume_judge_agent import ResumeJudgeAgent # Relative import within 'agents' package
 from .tailoring import TailoringAgent # Relative import within 'agents' package
 from .cover_letter_agent import CoverLetterAgent # Relative import within 'agents' package
+from utils.post_process import compact_summary, compact_cover_letter, filter_ats_keywords
 
 class OrchestratorAgent:
-    def __init__(self, llm_client: GeminiClient):
-        self.jd_agent = JDAnalysisAgent(llm_client=llm_client)
+    def __init__(self, llm_client):
+        self.jd_agent = JDAnalysisAgent(llm_client=None)
         self.resume_agent = ResumeParserAgent()
         self.tailoring_agent = TailoringAgent(llm_client=llm_client)
         self.cover_letter_agent = CoverLetterAgent(llm_client=llm_client)
@@ -62,6 +63,8 @@ class OrchestratorAgent:
                 # Ensure state.job_description is at least an empty JobDescription or error state
                 state.job_description = JobDescription(job_title="Error: JD Analysis Failed", requirements=[], ats_keywords=[])
             else:
+                # Filter noisy ATS terms
+                job_description_obj.ats_keywords = filter_ats_keywords(job_description_obj.ats_keywords or [])
                 state.job_description = job_description_obj
                 logging.info(f"Job description analyzed. Title: '{state.job_description.job_title}', ATS Keywords count: {len(state.job_description.ats_keywords)}")
 
@@ -92,6 +95,8 @@ class OrchestratorAgent:
                     state.original_resume,
                     master_profile_text=master_profile_text
                 )
+                # Compact summary to target length
+                tailored_resume_object.summary = compact_summary(tailored_resume_object.summary or "", max_chars=450)
                 state.tailored_resume = tailored_resume_object
                 state.accumulated_tailored_text = final_accumulated_text
                 logging.info("Resume sections tailored successfully.")
@@ -117,6 +122,7 @@ class OrchestratorAgent:
                     company_name_override=company_name_for_cl
                 )
                 if state.generated_cover_letter_text:
+                    state.generated_cover_letter_text = compact_cover_letter(state.generated_cover_letter_text, max_chars=1300)
                     logging.info("Cover letter generated successfully.")
                 else:
                     logging.warning("Cover letter generation returned empty or failed.")

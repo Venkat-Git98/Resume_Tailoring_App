@@ -40,7 +40,7 @@ SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 LOGS_DIR = os.path.join(PROJECT_ROOT, "logs") 
 
 # --- Default Input File Names/Paths ---
-BASE_RESUME_PDF_NAME = "Shanmugam_AI_2025_4_YOE.pdf" 
+BASE_RESUME_PDF_NAME = "Shanmugam_ML_2025_4_YOE_M.pdf" 
 JOB_DESC_TXT_NAME = "job.txt" 
 DEFAULT_MASTER_PROFILE_NAME = "master_profile.txt"
 
@@ -70,11 +70,11 @@ PREDEFINED_CONTACT_INFO = {
     "city_state_zip": "Arlington, VA 22201",     # Add City, State, Zip
     "phone": "+1 (703) 216-2540",                # Explicit phone
     "email": "svenkatesh.js@gmail.com",          # Explicit email
-    "linkedin_text": "LinkedIn Profile",         # More descriptive text for the link
+    "linkedin_text": "LinkedIn",         # Label per requested format
     "linkedin_url": "https://www.linkedin.com/in/svenkatesh-js/",
-    "github_text": "GitHub Portfolio",           # More descriptive text for the link
+    "github_text": "GitHub",           # Label per requested format
     "github_url": "https://github.com/Venkat-Git98",
-    "portfolio_text": "Personal Portfolio",      # More descriptive text for the link
+    "portfolio_text": "Portfolio",      # Label per requested format
     "portfolio_url": "https://venkatjs.netlify.app/",
     "line1_info": "Virginia US | svenkatesh.js@gmail.com | +1 (703) 216-2540" # Can be kept for other uses or removed if redundant
 }
@@ -99,6 +99,15 @@ DEFAULT_FILENAME_KEYWORD = "AI"
 
 # --- LLM Configuration ---
 GEMINI_MODEL_FOR_TAILORING = os.getenv("GEMINI_MODEL", "gemini-1.5-pro-001") 
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_FREE_MODEL_PRIORITY = [
+    os.getenv("OPENROUTER_MODEL_PRIMARY", "deepseek/deepseek-chat-v3-0324:free"),
+    os.getenv("OPENROUTER_MODEL_SECONDARY", "deepseek/deepseek-r1-distill-llama-70b:free"),
+    os.getenv("OPENROUTER_MODEL_TERTIARY", "deepseek/deepseek-r1-0528-qwen3-8b:free"),
+    os.getenv("OPENROUTER_MODEL_QUATERNARY", "meta-llama/llama-3.3-8b-instruct:free")
+]
+DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
 
 # --- Logging Configuration ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper() 
@@ -179,6 +188,17 @@ class Config:
     SCRAPER_CONSOLIDATED_RELEVANT_NEW_JOBS_FILE = SCRAPER_CONSOLIDATED_RELEVANT_NEW_JOBS_FILE
     SCRAPER_SCHEDULE_INTERVAL_MINUTES = SCRAPER_SCHEDULE_INTERVAL_MINUTES
     SCRAPER_RELEVANT_JOB_KEYWORDS = SCRAPER_RELEVANT_JOB_KEYWORDS
+    
+    # OpenRouter / Multi-LLM
+    OPENROUTER_API_KEY = OPENROUTER_API_KEY
+    OPENROUTER_BASE_URL = OPENROUTER_BASE_URL
+    OPENROUTER_FREE_MODEL_PRIORITY = OPENROUTER_FREE_MODEL_PRIORITY
+
+    # One-page enforcement
+    ENFORCE_ONE_PAGE = True
+    
+    # Google Drive (optional) parent folder for uploads (My Drive or Shared Drive)
+    DRIVE_PARENT_FOLDER_ID = DRIVE_PARENT_FOLDER_ID
     
     # Jobright Profile
     JOBRIGHT_PROFILE_DIR_RELATIVE = JOBRIGHT_PROFILE_DIR_RELATIVE

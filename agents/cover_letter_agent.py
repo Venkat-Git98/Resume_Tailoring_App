@@ -4,10 +4,10 @@ from typing import Dict, List, Optional
 import re # For parsing project titles from tailored_projects_text
 
 from models import JobDescription, ResumeSections
-from utils.llm_gemini import GeminiClient, get_cover_letter_prompt
+from utils.llm_gemini import GeminiClient, get_cover_letter_prompt, LLMRouter
 
 class CoverLetterAgent:
-    def __init__(self, llm_client: GeminiClient):
+    def __init__(self, llm_client):
         self.llm = llm_client
         # You might want to pass project_hyperlinks from config or main.py if it's dynamic
         # For now, let's define a similar structure here or assume it's passed.
@@ -115,7 +115,10 @@ class CoverLetterAgent:
                 hiring_manager_name=None 
             )
 
-            cover_letter_text = self.llm.generate_text(prompt, temperature=0.35, max_tokens=1500) # Slightly higher temp for CL
+            if hasattr(self.llm, 'generate'):
+                cover_letter_text = self.llm.generate(prompt, temperature=0.35, max_tokens=1500, task="cover_letter")
+            else:
+                cover_letter_text = self.llm.generate_text(prompt, temperature=0.35, max_tokens=1500)
             
             cleaned_cover_letter = cover_letter_text.strip()
             if cleaned_cover_letter.lower().startswith("cover letter:"):
